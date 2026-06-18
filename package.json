@@ -1,0 +1,51 @@
+{
+  "name": "mountain-hermit-vertical-slice",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mountain Hermit: Path of Immortality vertical slice prototype.",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite --host 127.0.0.1",
+    "dev:electron": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:3000 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:3000 electron .\"",
+    "build:web": "tsc --noEmit && vite build",
+    "build:electron": "npm run build:web && electron-builder --dir",
+    "package": "npm run build:web && electron-builder",
+    "test": "vitest run",
+    "test:e2e": "playwright test"
+  },
+  "build": {
+    "appId": "com.mountainhermit.prototype",
+    "productName": "Mountain Hermit Prototype",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "nsis"
+    }
+  },
+  "dependencies": {
+    "phaser": "4.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.0",
+    "@rolldown/binding-win32-x64-msvc": "1.0.3",
+    "@types/node": "25.9.3",
+    "concurrently": "10.0.3",
+    "cross-env": "10.1.0",
+    "electron": "42.4.1",
+    "electron-builder": "26.15.3",
+    "typescript": "6.0.3",
+    "vite": "8.0.16",
+    "vitest": "4.1.9",
+    "wait-on": "9.0.10"
+  },
+  "overrides": {
+    "@noble/hashes": "1.8.0"
+  }
+}
