@@ -4,7 +4,7 @@ test('starts WebGL prototype and enters the farm', async ({ page }) => {
   await page.goto('/');
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  await page.keyboard.press('Enter');
+  await page.mouse.click(540, 160);
   await expect(canvas).toBeVisible();
 });
 
@@ -15,7 +15,7 @@ test('changes between farm and forest without scene lifecycle errors', async ({ 
   await page.goto('/');
   const canvas = page.locator('canvas');
   await expect(canvas).toBeVisible();
-  await page.keyboard.press('Enter');
+  await page.mouse.click(540, 160);
   await expect(canvas).toBeVisible();
 
   await page.keyboard.press('Tab');

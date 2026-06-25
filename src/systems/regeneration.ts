@@ -1,5 +1,7 @@
 import { TUNING } from '../data/tuning';
 import type { GameSave } from '../types';
+import { activeBuffBonuses } from './buffs';
+import { dailyCondition } from './dailyConditions';
 
 export function hungerRegenerationMultiplier(hunger: number): number {
   if (hunger >= 75) return 1;
@@ -13,8 +15,10 @@ export function effectiveRegenerationPerSecond(save: GameSave): number {
   const hungerMultiplier = hungerRegenerationMultiplier(player.hunger);
   if (hungerMultiplier <= 0) return 0;
   const skillMultiplier = 1 + Math.max(0, player.skills.gathering.level - 1) * TUNING.survival.regenerationSkillBonusPerLevel;
-  const buffMultiplier = player.buffs.regenerationMultiplier;
-  return Math.max(0, (player.regenerate + player.buffs.regenerationFlat) * hungerMultiplier * skillMultiplier * buffMultiplier);
+  const activeBuffs = activeBuffBonuses(save);
+  const buffMultiplier = player.buffs.regenerationMultiplier * activeBuffs.regenerationMultiplier;
+  const buffFlat = player.buffs.regenerationFlat + activeBuffs.regenerationFlat;
+  return Math.max(0, (player.regenerate + buffFlat) * hungerMultiplier * skillMultiplier * buffMultiplier * dailyCondition(save).regenerationMultiplier);
 }
 
 export function effectivePetRegenerationPerSecond(save: GameSave): number {
@@ -23,6 +27,8 @@ export function effectivePetRegenerationPerSecond(save: GameSave): number {
   const hungerMultiplier = hungerRegenerationMultiplier(save.player.hunger);
   if (hungerMultiplier <= 0) return 0;
   const bondMultiplier = 1 + Math.max(0, save.player.affinities.light) * 0.02;
-  const buffMultiplier = pet.buffs.regenerationMultiplier;
-  return Math.max(0, (pet.regenerate + pet.buffs.regenerationFlat) * hungerMultiplier * bondMultiplier * buffMultiplier);
+  const activeBuffs = activeBuffBonuses(save);
+  const buffMultiplier = pet.buffs.regenerationMultiplier * activeBuffs.regenerationMultiplier;
+  const buffFlat = pet.buffs.regenerationFlat + activeBuffs.regenerationFlat;
+  return Math.max(0, (pet.regenerate + buffFlat) * hungerMultiplier * bondMultiplier * buffMultiplier * dailyCondition(save).regenerationMultiplier);
 }

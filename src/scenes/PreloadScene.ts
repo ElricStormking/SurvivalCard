@@ -16,6 +16,13 @@ const iconResinUrl = new URL('../../assets/icons/materials/icon_resin_ds.png', i
 const iconAxeUrl = new URL('../../assets/icons/tools/icon_axe_ds.png', import.meta.url).href;
 const iconPickaxeUrl = new URL('../../assets/icons/tools/icon_pickaxe_ds.png', import.meta.url).href;
 const iconSwordUrl = new URL('../../assets/icons/weapons/icon_sword_ds.png', import.meta.url).href;
+const treeBambooUrl = new URL('../../assets/nodes/trees/bamboo_grove_ds.png', import.meta.url).href;
+const treeBirchUrl = new URL('../../assets/nodes/trees/birch_tree_ds.png', import.meta.url).href;
+const treeCupressaceaeUrl = new URL('../../assets/nodes/trees/cupressaceae_tree_ds.png', import.meta.url).href;
+const treeGenericUrl = new URL('../../assets/nodes/trees/generic_tree_ds.png', import.meta.url).href;
+const treeJuniperUrl = new URL('../../assets/nodes/trees/juniper_tree_ds.png', import.meta.url).href;
+const treePineUrl = new URL('../../assets/nodes/trees/pine_tree_ds.png', import.meta.url).href;
+const treeWillowUrl = new URL('../../assets/nodes/trees/willow_tree_ds.png', import.meta.url).href;
 
 export class PreloadScene extends Phaser.Scene {
   constructor() {
@@ -39,6 +46,13 @@ export class PreloadScene extends Phaser.Scene {
     this.load.image('iconAxe', iconAxeUrl);
     this.load.image('iconPickaxe', iconPickaxeUrl);
     this.load.image('iconSword', iconSwordUrl);
+    this.load.image('treeBamboo', treeBambooUrl);
+    this.load.image('treeBirch', treeBirchUrl);
+    this.load.image('treeCupressaceae', treeCupressaceaeUrl);
+    this.load.image('treeGeneric', treeGenericUrl);
+    this.load.image('treeJuniper', treeJuniperUrl);
+    this.load.image('treePine', treePineUrl);
+    this.load.image('treeWillow', treeWillowUrl);
   }
 
   create(): void {

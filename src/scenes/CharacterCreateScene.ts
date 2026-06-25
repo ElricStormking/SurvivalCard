@@ -32,7 +32,14 @@ export class CharacterCreateScene extends Phaser.Scene {
       ['L', 'Load save']
     ];
     controls.forEach(([key, label], i) => {
-      this.add.text(470, 94 + i * 28, `${key}  ${label}`, { fontFamily: 'Georgia', fontSize: '17px', color: '#efe3bd' });
+      const control = this.add.text(470, 94 + i * 28, `${key}  ${label}`, { fontFamily: 'Georgia', fontSize: '17px', color: '#efe3bd' });
+      if (key === 'Enter' || key === 'L') {
+        control.setInteractive({ useHandCursor: true });
+        control.on('pointerdown', () => {
+          if (key === 'Enter') this.confirm();
+          else this.scene.start('FarmScene');
+        });
+      }
     });
 
     this.info = this.add.text(470, 230, '', {
@@ -49,6 +56,10 @@ export class CharacterCreateScene extends Phaser.Scene {
     this.input.keyboard?.on('keydown-S', () => this.changeRoll(1));
     this.input.keyboard?.on('keydown-ENTER', () => this.confirm());
     this.input.keyboard?.on('keydown-L', () => this.scene.start('FarmScene'));
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (pointer.x >= 460 && pointer.x <= 650 && pointer.y >= 140 && pointer.y <= 176) this.confirm();
+      if (pointer.x >= 460 && pointer.x <= 650 && pointer.y > 176 && pointer.y <= 208) this.scene.start('FarmScene');
+    });
     this.refresh();
   }
 

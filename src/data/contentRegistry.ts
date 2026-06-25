@@ -1,4 +1,5 @@
 import { ENEMIES, SIEGE_WAVES } from './enemies';
+import { EXPEDITIONS } from './expeditions';
 import { itemIconKey } from './itemIcons';
 import { ITEMS } from './items';
 import { PROFESSIONS } from './professions';
@@ -48,6 +49,20 @@ export function validateContentRegistry(): ContentValidationResult {
   SIEGE_WAVES.flat().forEach((enemyId: EnemyId) => {
     if (!enemyIds.has(enemyId)) errors.push(`Siege wave references unknown enemy ${enemyId}`);
   });
+
+  for (const route of Object.values(EXPEDITIONS)) {
+    let previousThreshold = 0;
+    for (const enemy of route.enemies) {
+      if (!enemyIds.has(enemy.id)) errors.push(`Expedition ${route.id} references unknown enemy ${enemy.id}`);
+    }
+    for (const reinforcement of route.danger.reinforcements) {
+      if (!enemyIds.has(reinforcement.enemy)) errors.push(`Expedition ${route.id} reinforcement references unknown enemy ${reinforcement.enemy}`);
+      if (reinforcement.threshold <= previousThreshold || reinforcement.threshold > 100) {
+        errors.push(`Expedition ${route.id} has invalid reinforcement threshold ${reinforcement.threshold}`);
+      }
+      previousThreshold = reinforcement.threshold;
+    }
+  }
 
   for (const requiredRecipe of ['medicine', 'grilledMeat', 'herbSteak', 'ironSword', 'ironAxe', 'ironPickaxe', 'barricade', 'spikeTrap', 'fireTalismanTrap', 'repairKit'] satisfies RecipeId[]) {
     if (!recipeIds.has(requiredRecipe)) errors.push(`Missing required prototype recipe ${requiredRecipe}`);

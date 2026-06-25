@@ -1,4 +1,4 @@
-import type { AttributeProgress, AttributeSet, DeviceId, GameSave, ItemId, PlayerState, PrototypeAffinities, RecipeId, WorldState } from '../types';
+import type { AttributeProgress, AttributeSet, DeviceId, ExpeditionRouteId, GameSave, ItemId, PlayerState, PrototypeAffinities, RecipeId, WorldState } from '../types';
 import { TUNING } from '../data/tuning';
 import { PROFESSIONS } from '../data/professions';
 import { createBackgroundRolls } from './professionRolls';
@@ -7,6 +7,11 @@ const SAVE_KEY = 'mountain-hermit-save-v1';
 const CURRENT_SAVE_VERSION = 2;
 const SHARED_RECIPE_UNLOCKS: RecipeId[] = ['medicine', 'grilledMeat', 'herbSteak', 'ironAxe', 'ironPickaxe'];
 const DEFAULT_HOTBAR: (ItemId | null)[] = ['rustedSword', 'woodenAxe', 'stonePickaxe', 'medicine', 'grilledMeat', 'herbSteak', 'repairKit', 'unarmed'];
+const DEFAULT_EXPEDITION_ROUTE: ExpeditionRouteId = 'pineForest';
+const DEFAULT_EXPEDITION_STATS: WorldState['expeditionStats'] = {
+  pineForest: { visits: 0, extractions: 0, clears: 0 },
+  ironRidge: { visits: 0, extractions: 0, clears: 0 }
+};
 
 const DEFAULT_ATTRIBUTES: AttributeSet = {
   strength: 1,
@@ -68,6 +73,7 @@ export function createNewSave(name = 'Nameless Hermit', professionIndex = 0, rol
       light: background.affinities.light ?? 0
     },
     equipped: background.items.ironSword ? 'ironSword' : 'rustedSword',
+    itemDurability: {},
     hotbar: normalizeHotbar([background.items.ironSword ? 'ironSword' : 'rustedSword', 'woodenAxe', 'stonePickaxe', 'medicine', 'grilledMeat', 'herbSteak', 'repairKit', 'unarmed']),
     inventory: { ...background.items, herb: (background.items.herb ?? 0) + 2, meat: (background.items.meat ?? 0) + 1 },
     unsecured: {},
@@ -80,6 +86,11 @@ export function createNewSave(name = 'Nameless Hermit', professionIndex = 0, rol
       swordQiSlash: { xp: 0, level: 1, unlocked: false }
     },
     skillPoints: 1,
+    cultivation: {
+      realm: 'Mortal',
+      insight: 0,
+      breakthroughs: 0
+    },
     passives: {
       orbitingSword: true,
       minorFlameAura: true
@@ -88,6 +99,7 @@ export function createNewSave(name = 'Nameless Hermit', professionIndex = 0, rol
       regenerationMultiplier: 1,
       regenerationFlat: 0
     },
+    activeBuffs: {},
     spiritDog: {
       unlocked: true,
       command: 'follow',
@@ -114,6 +126,20 @@ export function createNewSave(name = 'Nameless Hermit', professionIndex = 0, rol
     alchemyFurnace: {},
     talismanTable: {}
   };
+  const emptyDeviceFuel: WorldState['deviceFuel'] = {
+    workbench: 0,
+    cookingFire: 0,
+    furnace: 0,
+    alchemyFurnace: 0,
+    talismanTable: 0
+  };
+  const fullDeviceCondition: WorldState['deviceCondition'] = {
+    workbench: 100,
+    cookingFire: 100,
+    furnace: 100,
+    alchemyFurnace: 100,
+    talismanTable: 100
+  };
 
   return {
     version: CURRENT_SAVE_VERSION,
@@ -124,12 +150,21 @@ export function createNewSave(name = 'Nameless Hermit', professionIndex = 0, rol
       minutes: 6 * 60,
       timeScale: 6,
       scene: 'farm',
+      expeditionRoute: DEFAULT_EXPEDITION_ROUTE,
+      expeditionStats: cloneExpeditionStats(DEFAULT_EXPEDITION_STATS),
       formationCoreHp: 150,
       devices: emptyDevices,
+      deviceFuel: emptyDeviceFuel,
+      deviceCondition: fullDeviceCondition,
       deviceOutputs: emptyDeviceOutputs,
       defenses: { barricade: 0, spikeTrap: 0, fireTalismanTrap: 0 },
       siegeWon: false,
-      objectives: { ...DEFAULT_OBJECTIVES }
+      siegeCyclesSurvived: 0,
+      lostLoot: null,
+      lastNightEventDay: 0,
+      nightEventLog: [],
+      objectives: { ...DEFAULT_OBJECTIVES },
+      objectiveRewardsClaimed: {}
     }
   };
 }
@@ -169,8 +204,14 @@ function hydrateSave(save: GameSave): GameSave {
   save.player.attributeProgress = { ...DEFAULT_ATTRIBUTE_PROGRESS, ...(save.player.attributeProgress ?? {}) };
   save.player.affinities = { ...DEFAULT_AFFINITIES, ...(save.player.affinities ?? {}) };
   save.player.regenerate = save.player.regenerate ?? TUNING.survival.baseRegenerationPerSecond;
+  save.player.itemDurability = save.player.itemDurability ?? {};
   save.player.hotbar = normalizeHotbar(save.player.hotbar);
   save.player.unlockedRecipes = uniqueRecipes([...SHARED_RECIPE_UNLOCKS, ...(save.player.unlockedRecipes ?? [])]);
+  save.player.cultivation = {
+    realm: save.player.cultivation?.realm ?? 'Mortal',
+    insight: save.player.cultivation?.insight ?? 0,
+    breakthroughs: save.player.cultivation?.breakthroughs ?? 0
+  };
   save.player.passives = {
     orbitingSword: save.player.passives?.orbitingSword ?? true,
     minorFlameAura: save.player.passives?.minorFlameAura ?? true
@@ -179,6 +220,7 @@ function hydrateSave(save: GameSave): GameSave {
     regenerationMultiplier: save.player.buffs?.regenerationMultiplier ?? 1,
     regenerationFlat: save.player.buffs?.regenerationFlat ?? 0
   };
+  save.player.activeBuffs = save.player.activeBuffs ?? {};
   save.player.spiritDog = {
     unlocked: save.player.spiritDog?.unlocked ?? true,
     command: save.player.spiritDog?.command ?? 'follow',
@@ -189,8 +231,17 @@ function hydrateSave(save: GameSave): GameSave {
       regenerationFlat: save.player.spiritDog?.buffs?.regenerationFlat ?? 0
     }
   };
+  save.world.expeditionRoute = save.world.expeditionRoute ?? DEFAULT_EXPEDITION_ROUTE;
+  save.world.expeditionStats = hydrateExpeditionStats(save.world.expeditionStats);
+  save.world.deviceFuel = hydrateDeviceFuel(save.world.deviceFuel);
+  save.world.deviceCondition = hydrateDeviceCondition(save.world.deviceCondition);
   save.world.deviceOutputs = hydrateDeviceOutputs(save.world.deviceOutputs);
+  save.world.siegeCyclesSurvived = save.world.siegeCyclesSurvived ?? 0;
+  save.world.lostLoot = save.world.lostLoot ?? null;
+  save.world.lastNightEventDay = save.world.lastNightEventDay ?? 0;
+  save.world.nightEventLog = save.world.nightEventLog ?? [];
   save.world.objectives = { ...DEFAULT_OBJECTIVES, ...(save.world.objectives ?? {}) };
+  save.world.objectiveRewardsClaimed = save.world.objectiveRewardsClaimed ?? {};
   return save;
 }
 
@@ -225,6 +276,40 @@ function hydrateDeviceOutputs(outputs: Partial<WorldState['deviceOutputs']> | un
     furnace: { ...(outputs?.furnace ?? {}) },
     alchemyFurnace: { ...(outputs?.alchemyFurnace ?? {}) },
     talismanTable: { ...(outputs?.talismanTable ?? {}) }
+  };
+}
+
+function hydrateDeviceFuel(fuel: Partial<WorldState['deviceFuel']> | undefined): WorldState['deviceFuel'] {
+  return {
+    workbench: fuel?.workbench ?? 0,
+    cookingFire: fuel?.cookingFire ?? 0,
+    furnace: fuel?.furnace ?? 0,
+    alchemyFurnace: fuel?.alchemyFurnace ?? 0,
+    talismanTable: fuel?.talismanTable ?? 0
+  };
+}
+
+function hydrateDeviceCondition(condition: Partial<WorldState['deviceCondition']> | undefined): WorldState['deviceCondition'] {
+  return {
+    workbench: condition?.workbench ?? 100,
+    cookingFire: condition?.cookingFire ?? 100,
+    furnace: condition?.furnace ?? 100,
+    alchemyFurnace: condition?.alchemyFurnace ?? 100,
+    talismanTable: condition?.talismanTable ?? 100
+  };
+}
+
+function hydrateExpeditionStats(stats: Partial<WorldState['expeditionStats']> | undefined): WorldState['expeditionStats'] {
+  return {
+    pineForest: { ...DEFAULT_EXPEDITION_STATS.pineForest, ...(stats?.pineForest ?? {}) },
+    ironRidge: { ...DEFAULT_EXPEDITION_STATS.ironRidge, ...(stats?.ironRidge ?? {}) }
+  };
+}
+
+function cloneExpeditionStats(stats: WorldState['expeditionStats']): WorldState['expeditionStats'] {
+  return {
+    pineForest: { ...stats.pineForest },
+    ironRidge: { ...stats.ironRidge }
   };
 }
 

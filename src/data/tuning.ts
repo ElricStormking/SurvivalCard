@@ -9,6 +9,14 @@ export const TUNING = {
     movingEnergyRecoveryPerSecond: 2.5,
     starvationDamagePerSecond: 2
   },
+  dodge: {
+    energyCost: 16,
+    cooldownMs: 650,
+    invulnerabilityMs: 240,
+    baseDistance: 118,
+    agilityDistanceBonus: 2.5,
+    exhaustedDistanceMultiplier: 0.72
+  },
   gathering: {
     baseMs: {
       tree: 3200,
@@ -17,6 +25,11 @@ export const TUNING = {
     },
     skillReductionPerLevel: 0.07,
     minimumSkillMultiplier: 0.55
+  },
+  production: {
+    skillReductionPerLevel: 0.05,
+    intelligenceReductionPerPoint: 0.01,
+    minimumDurationMultiplier: 0.55
   },
   debug: {
     resourceGrantAmount: 10

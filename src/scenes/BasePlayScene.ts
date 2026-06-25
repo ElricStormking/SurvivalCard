@@ -3,11 +3,20 @@ import { ENEMIES } from '../data/enemies';
 import { ITEMS } from '../data/items';
 import { itemIconKey } from '../data/itemIcons';
 import { TUNING } from '../data/tuning';
-import { addItems, inventoryText, loseHalf, removeItems } from '../systems/inventory';
+import { addItems, inventoryText, removeItems } from '../systems/inventory';
 import { grantSkillXp, skillXpForNextLevel, spendSkillPoint, unlockSwordQiSlash } from '../systems/progression';
-import { activeObjective, objectiveSteps } from '../systems/objectives';
+import { activeObjective, claimCompletedObjectiveRewards, objectiveRewardSummary, objectiveSteps } from '../systems/objectives';
 import { effectivePetRegenerationPerSecond, effectiveRegenerationPerSecond, hungerRegenerationMultiplier } from '../systems/regeneration';
+import { installAudioUnlock, playAudioCue } from '../systems/audio';
+import { conditionHudLine } from '../systems/dailyConditions';
+import { damageDurability, durabilityCurrent, durabilityMax, durabilityRatio } from '../systems/durability';
 import { saveGame } from '../systems/save';
+import { survivalStatus } from '../systems/survivalStatus';
+import { activeBuffLine, applyConsumableBuff, tickActiveBuffs } from '../systems/buffs';
+import { dodgeProfile } from '../systems/dodge';
+import { encumbrance } from '../systems/encumbrance';
+import { createLostLootFromDefeat } from '../systems/lostLoot';
+import { equippedCombatDamage } from '../systems/maintenance';
 import { tickWorld } from '../systems/time';
 import { CardActor } from '../objects/CardActor';
 import { GameStore } from '../state/GameStore';
@@ -17,7 +26,14 @@ interface EnemyActor {
   id: EnemyId;
   actor: CardActor;
   attackTimer: number;
+  damageMultiplier: number;
   defeated?: boolean;
+}
+
+interface EnemySpawnOptions {
+  hpMultiplier?: number;
+  damageMultiplier?: number;
+  labelSuffix?: string;
 }
 
 interface CollisionObstacle {
@@ -33,6 +49,8 @@ interface MovementBounds {
   minY: number;
   maxY: number;
 }
+
+type InventorySource = 'inventory' | 'storage';
 
 export abstract class BasePlayScene extends Phaser.Scene {
   protected player!: CardActor;
@@ -64,6 +82,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
     fallback: Phaser.GameObjects.Text;
     count: Phaser.GameObjects.Text;
     key: Phaser.GameObjects.Text;
+    durability: Phaser.GameObjects.Rectangle;
   }[] = [];
   private selectedHotbarSlot = 0;
   private inventoryOpen = false;
@@ -74,8 +93,13 @@ export abstract class BasePlayScene extends Phaser.Scene {
   private skillsOpen = false;
   private skillsMovementLock = false;
   private skillsPanel?: Phaser.GameObjects.Container;
+  private dodgeKey!: Phaser.Input.Keyboard.Key;
+  private lastDodge = -Infinity;
+  private dodgeInvulnerableUntil = 0;
+  private dodging = false;
 
   protected createControls(): void {
+    installAudioUnlock();
     this.cursors = {
       up: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.W),
       down: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.S),
@@ -83,7 +107,9 @@ export abstract class BasePlayScene extends Phaser.Scene {
       right: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.D),
       shift: this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT)
     };
+    this.dodgeKey = this.input.keyboard!.addKey(Phaser.Input.Keyboard.KeyCodes.CTRL);
     this.input.keyboard?.on('keydown-SPACE', () => this.basicAttack());
+    this.input.keyboard?.on('keydown-CTRL', () => this.performDodge());
     this.input.keyboard?.on('keydown-T', () => this.castSwordQi());
     this.input.keyboard?.on('keydown-Q', () => this.consumeBestFood());
     this.input.keyboard?.on('keydown-I', () => this.toggleInventoryPanel());
@@ -102,7 +128,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
     });
     this.input.keyboard?.on('keydown-Z', () => this.setSpiritDogCommand('follow'));
     this.input.keyboard?.on('keydown-X', () => this.setSpiritDogCommand('guard'));
-    this.input.keyboard?.on('keydown-C', () => this.setSpiritDogCommand('retreat'));
+    this.input.keyboard?.on('keydown-V', () => this.setSpiritDogCommand('retreat'));
     this.input.keyboard?.on('keydown-F', () => this.setSpiritDogCommand('attack'));
     this.input.keyboard?.on('keydown-U', () => unlockSwordQiSlash(GameStore.save));
     this.input.keyboard?.on('keydown-F3', () => this.toggleDebugOverlay());
@@ -127,9 +153,19 @@ export abstract class BasePlayScene extends Phaser.Scene {
     });
     this.input.keyboard?.on('keydown-F12', () => this.debugGrantProgression());
     this.input.keyboard?.on('keydown-BRACKETLEFT', () => this.toggleUnarmed());
-    this.input.on('pointerdown', () => {
-      if (!this.inventoryOpen && !this.skillsOpen) this.basicAttack();
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (this.skillsOpen) {
+        this.handleSkillsPanelPointer(pointer);
+        return;
+      }
+      if (this.movementLocked) return;
+      if (pointer.rightButtonDown()) {
+        this.performDodge(pointer);
+        return;
+      }
+      if (!this.inventoryOpen) this.basicAttack();
     });
+    this.input.mouse?.disableContextMenu();
   }
 
   protected createHud(): void {
@@ -179,9 +215,10 @@ export abstract class BasePlayScene extends Phaser.Scene {
     this.updateSurvivalHud();
     this.updateHotbarHud();
     this.refreshHud();
+    this.claimObjectiveRewards();
     this.updateObjectiveHud();
     this.updateDebugOverlay();
-    if (GameStore.save.world.day >= 15 && this.scene.key !== 'SiegeScene') this.scene.start('SiegeScene');
+    if (GameStore.save.world.day >= 15 && !GameStore.save.world.siegeWon && this.scene.key !== 'SiegeScene') this.scene.start('SiegeScene');
   }
 
   protected movePlayer(time: number, delta: number): void {
@@ -189,6 +226,11 @@ export abstract class BasePlayScene extends Phaser.Scene {
       this.updateSurvivalMeters(delta, false, false);
       this.player.setDepth(this.player.y);
       this.player.wobble(time, false);
+      return;
+    }
+    if (this.dodging) {
+      this.updateSurvivalMeters(delta, false, false);
+      this.player.setDepth(this.player.y);
       return;
     }
 
@@ -200,7 +242,8 @@ export abstract class BasePlayScene extends Phaser.Scene {
     if (moving) dir.normalize();
     const sprinting = moving && this.cursors.shift.isDown && GameStore.save.player.energy > 2;
     this.updateSurvivalMeters(delta, moving, sprinting);
-    const speed = this.player.speed * (sprinting ? 1.45 : 1);
+    const status = survivalStatus(GameStore.save, this.player.hp);
+    const speed = this.player.speed * (sprinting ? 1.45 : 1) * status.movementMultiplier;
     const moved = this.moveActorWithCollision(this.player, dir.x * speed * delta / 1000, dir.y * speed * delta / 1000, {
       minX: 60,
       maxX: 1860,
@@ -263,6 +306,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
   private updateSurvivalMeters(delta: number, moving: boolean, sprinting: boolean): void {
     const seconds = delta / 1000;
     const player = GameStore.save.player;
+    tickActiveBuffs(GameStore.save, seconds);
     if (sprinting) {
       player.energy = Phaser.Math.Clamp(player.energy - seconds * TUNING.survival.sprintEnergyDrainPerSecond, 0, 100);
     } else {
@@ -383,6 +427,10 @@ export abstract class BasePlayScene extends Phaser.Scene {
         fontSize: '10px',
         color: '#cdbb91'
       }).setScrollFactor(0).setDepth(10_014);
+      const durability = this.add.rectangle(x + 5, y + slotSize - 7, 0, 4, 0x8fd16a, 0.95)
+        .setOrigin(0, 0)
+        .setScrollFactor(0)
+        .setDepth(10_014);
 
       frame.on('pointerdown', () => {
         this.selectedHotbarSlot = index;
@@ -392,17 +440,17 @@ export abstract class BasePlayScene extends Phaser.Scene {
         if (!this.draggedInventoryItem) return;
         this.assignHotbarItem(this.draggedInventoryItem, index, false);
       });
-      this.hotbarSlots.push({ frame, fill, icon, fallback, count, key });
+      this.hotbarSlots.push({ frame, fill, icon, fallback, count, key, durability });
     }
 
     this.updateHotbarHud();
   }
 
-  private updateHotbarHud(): void {
+  protected updateHotbarHud(): void {
     if (!this.hotbarSlots.length) return;
     const hotbar = GameStore.save.player.hotbar;
     this.hotbarSlots.forEach((slot, index) => {
-      if (!slot.frame.active || !slot.fill.active || !slot.icon.active || !slot.fallback.active || !slot.count.active || !slot.key.active) return;
+      if (!slot.frame.active || !slot.fill.active || !slot.icon.active || !slot.fallback.active || !slot.count.active || !slot.key.active || !slot.durability.active) return;
       const itemId = hotbar[index] ?? null;
       const item = itemId ? ITEMS[itemId] : undefined;
       const count = itemId ? this.availableItemCount(itemId) : 0;
@@ -419,6 +467,11 @@ export abstract class BasePlayScene extends Phaser.Scene {
       slot.count.setText(item && item.id !== 'unarmed' ? String(count) : '');
       slot.count.setColor(count > 0 ? '#f6deb0' : '#ff9f72');
       slot.key.setColor(selected ? '#fff0bd' : '#cdbb91');
+      const durabilityMaxValue = itemId ? durabilityMax(itemId) : 0;
+      const durabilityValue = itemId ? durabilityRatio(GameStore.save, itemId) : 0;
+      slot.durability.setVisible(durabilityMaxValue > 0 && count > 0);
+      slot.durability.width = 40 * durabilityValue;
+      slot.durability.setFillStyle(durabilityValue > 0.5 ? 0x8fd16a : durabilityValue > 0.25 ? 0xd0ad3f : 0xc34d3b, 0.95);
     });
   }
 
@@ -451,77 +504,143 @@ export abstract class BasePlayScene extends Phaser.Scene {
     this.inventoryPanel?.destroy(true);
     if (!this.inventoryOpen) return;
 
-    const panel = this.add.container(312, 112).setScrollFactor(0).setDepth(10_080);
-    const bg = this.add.rectangle(0, 0, 656, 420, 0x15100b, 0.91)
+    const panel = this.add.container(282, 76).setScrollFactor(0).setDepth(10_080);
+    const bg = this.add.rectangle(0, 0, 716, 500, 0x15100b, 0.92)
       .setOrigin(0, 0)
       .setStrokeStyle(2, 0xd0ad61, 0.9);
-    const title = this.add.text(18, 16, 'Inventory & Toolbar', {
+    const carry = encumbrance(GameStore.save);
+    const title = this.add.text(18, 14, 'Inventory, Storage & Toolbar', {
       fontFamily: 'Georgia',
       fontSize: '22px',
       color: '#f8e7b8'
     });
-    const help = this.add.text(18, 48, `I close   Drag item to hotbar or click item for selected slot ${this.selectedHotbarSlot + 1}   Number keys use hotbar`, {
+    const help = this.add.text(18, 46, `I close   Drag/click item to assign slot ${this.selectedHotbarSlot + 1}   Store/Take moves one item   ${carry.line}`, {
       fontFamily: 'Georgia',
       fontSize: '13px',
       color: '#cdbb91'
     });
     panel.add([bg, title, help]);
 
-    const entries = this.inventoryEntries();
-    entries.forEach((entry, index) => {
-      const col = index % 5;
-      const row = Math.floor(index / 5);
-      const x = 18 + col * 124;
-      const y = 84 + row * 76;
-      const card = this.add.rectangle(x, y, 112, 62, 0x241a11, 0.94)
-        .setOrigin(0, 0)
-        .setStrokeStyle(1, 0x5b4529)
-        .setInteractive({ useHandCursor: true });
-      const swatch = this.add.rectangle(x + 10, y + 11, 38, 38, this.itemIconColor(entry.itemId), 0.95)
-        .setOrigin(0, 0)
-        .setStrokeStyle(1, 0xe5c982, 0.8);
-      const iconKey = itemIconKey(entry.itemId);
-      const icon = iconKey
-        ? this.add.image(x + 29, y + 30, iconKey).setDisplaySize(32, 32)
-        : this.add.text(x + 29, y + 31, this.itemIconLabel(entry.itemId), {
+    const carriedEntries = this.inventoryEntries(GameStore.save.player.inventory);
+    const storageEntries = this.inventoryEntries(GameStore.save.player.storage);
+    this.renderInventorySection(panel, 'Carried Inventory', 'inventory', carriedEntries, 18, 82, 'Store');
+    this.renderInventorySection(panel, 'Farm Storage', 'storage', storageEntries, 18, 288, 'Take');
+
+    this.inventoryPanel = panel;
+  }
+
+  private renderInventorySection(
+    panel: Phaser.GameObjects.Container,
+    title: string,
+    source: InventorySource,
+    entries: { itemId: ItemId; count: number }[],
+    startX: number,
+    startY: number,
+    transferLabel: string
+  ): void {
+    const sectionBg = this.add.rectangle(startX, startY, 680, 182, 0x100c08, 0.44)
+      .setOrigin(0, 0)
+      .setStrokeStyle(1, 0x4f3b22, 0.72);
+    const header = this.add.text(startX + 12, startY + 8, title, {
+      fontFamily: 'Georgia',
+      fontSize: '15px',
+      color: '#f5e2b2'
+    });
+    const countSummary = this.add.text(startX + 548, startY + 10, `${entries.length} stacks`, {
+      fontFamily: 'Georgia',
+      fontSize: '12px',
+      color: '#bba77a'
+    });
+    panel.add([sectionBg, header, countSummary]);
+
+    if (entries.length === 0) {
+      panel.add(this.add.text(startX + 14, startY + 58, source === 'inventory' ? 'Nothing carried.' : 'Storage empty.', {
         fontFamily: 'Georgia',
-        fontSize: '13px',
+        fontSize: '14px',
+        color: '#ffcf9c'
+      }));
+      return;
+    }
+
+    entries.slice(0, 12).forEach((entry, index) => {
+      const col = index % 4;
+      const row = Math.floor(index / 4);
+      const x = startX + 12 + col * 166;
+      const y = startY + 34 + row * 48;
+      this.createInventoryCard(panel, entry.itemId, entry.count, source, transferLabel, x, y);
+    });
+
+    if (entries.length > 12) {
+      panel.add(this.add.text(startX + 560, startY + 160, `+${entries.length - 12} hidden`, {
+        fontFamily: 'Georgia',
+        fontSize: '11px',
+        color: '#bba77a'
+      }));
+    }
+  }
+
+  private createInventoryCard(
+    panel: Phaser.GameObjects.Container,
+    itemId: ItemId,
+    count: number,
+    source: InventorySource,
+    transferLabel: string,
+    x: number,
+    y: number
+  ): void {
+    const card = this.add.rectangle(x, y, 154, 42, 0x241a11, 0.94)
+      .setOrigin(0, 0)
+      .setStrokeStyle(1, 0x5b4529)
+      .setInteractive({ useHandCursor: true });
+    const swatch = this.add.rectangle(x + 7, y + 7, 28, 28, this.itemIconColor(itemId), 0.95)
+      .setOrigin(0, 0)
+      .setStrokeStyle(1, 0xe5c982, 0.8);
+    const iconKey = itemIconKey(itemId);
+    const icon = iconKey
+      ? this.add.image(x + 21, y + 21, iconKey).setDisplaySize(24, 24)
+      : this.add.text(x + 21, y + 22, this.itemIconLabel(itemId), {
+        fontFamily: 'Georgia',
+        fontSize: '10px',
         color: '#fff0bd',
         stroke: '#21150c',
         strokeThickness: 2
       }).setOrigin(0.5);
-      const name = this.add.text(x + 56, y + 10, ITEMS[entry.itemId].name, {
-        fontFamily: 'Georgia',
-        fontSize: '12px',
-        color: '#f5e2b2',
-        wordWrap: { width: 50 }
-      });
-      const meta = this.add.text(x + 56, y + 39, `${ITEMS[entry.itemId].kind} x${entry.count}`, {
-        fontFamily: 'Georgia',
-        fontSize: '11px',
-        color: '#cdbb91'
-      });
-      let wasDragged = false;
-      card.on('pointerup', () => {
-        if (!wasDragged) this.assignHotbarItem(entry.itemId);
-      });
-      this.makeInventoryEntryDraggable(card, icon, entry.itemId, () => {
-        wasDragged = true;
-      }, () => {
-        this.time.delayedCall(0, () => { wasDragged = false; });
-      });
-      panel.add([card, swatch, icon, name, meta]);
+    const name = this.add.text(x + 42, y + 5, ITEMS[itemId].name, {
+      fontFamily: 'Georgia',
+      fontSize: '10px',
+      color: '#f5e2b2',
+      wordWrap: { width: 66 }
+    });
+    const durabilityText = durabilityMax(itemId) > 0 ? ` ${Math.ceil(durabilityCurrent(GameStore.save, itemId))}/${durabilityMax(itemId)}` : '';
+    const meta = this.add.text(x + 42, y + 28, `${ITEMS[itemId].kind} x${count}${durabilityText}`, {
+      fontFamily: 'Georgia',
+      fontSize: '9px',
+      color: '#cdbb91'
+    });
+    const transferButton = this.add.rectangle(x + 124, y + 21, 52, 26, 0x563a1d, 0.88)
+      .setStrokeStyle(1, 0xcaa85e, 0.9)
+      .setInteractive({ useHandCursor: true });
+    const transferText = this.add.text(x + 124, y + 21, transferLabel, {
+      fontFamily: 'Georgia',
+      fontSize: '10px',
+      color: '#fff0bd'
+    }).setOrigin(0.5);
+
+    let wasDragged = false;
+    card.on('pointerup', () => {
+      if (!wasDragged) this.assignHotbarItem(itemId);
+    });
+    transferButton.on('pointerdown', (_pointer: Phaser.Input.Pointer, _localX: number, _localY: number, event?: Phaser.Types.Input.EventData) => {
+      event?.stopPropagation();
+      this.transferInventoryItem(itemId, source, 1);
+    });
+    this.makeInventoryEntryDraggable(card, icon, itemId, () => {
+      wasDragged = true;
+    }, () => {
+      this.time.delayedCall(0, () => { wasDragged = false; });
     });
 
-    if (entries.length === 0) {
-      panel.add(this.add.text(18, 96, 'No carried or stored items yet.', {
-        fontFamily: 'Georgia',
-        fontSize: '16px',
-        color: '#ffcf9c'
-      }));
-    }
-
-    this.inventoryPanel = panel;
+    panel.add([card, swatch, icon, name, meta, transferButton, transferText]);
   }
 
   private makeInventoryEntryDraggable(
@@ -621,7 +740,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
       fontSize: '22px',
       color: '#f8e7b8'
     });
-    const help = this.add.text(18, 48, `K close   Skill points ${save.player.skillPoints}   Click Train or Unlock`, {
+    const help = this.add.text(18, 48, `K close   Skill points ${save.player.skillPoints}   Click Train/Unlock or press 1-4`, {
       fontFamily: 'Georgia',
       fontSize: '13px',
       color: '#cdbb91'
@@ -672,7 +791,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
     const row = this.add.rectangle(18, y, 584, 64, locked ? 0x1c1510 : 0x241a11, 0.94)
       .setOrigin(0, 0)
       .setStrokeStyle(1, locked ? 0x5b4529 : 0x8f6a35, 0.92);
-    const title = this.add.text(34, y + 9, `${name}  Lv ${skill.level}`, {
+    const title = this.add.text(34, y + 9, `${this.skillHotkeyLabel(skillId)}  ${name}  Lv ${skill.level}`, {
       fontFamily: 'Georgia',
       fontSize: '15px',
       color: locked ? '#a99874' : '#f8e7b8'
@@ -690,22 +809,27 @@ export abstract class BasePlayScene extends Phaser.Scene {
     });
     const barBg = this.add.rectangle(34, y + 51, 250, 6, 0x2b1d12, 0.95).setOrigin(0, 0.5);
     const bar = this.add.rectangle(34, y + 51, 250 * xpRatio, 6, skillId === 'swordQiSlash' ? 0x80b7e6 : 0xd7a83a, 0.95).setOrigin(0, 0.5);
-    const button = this.add.rectangle(468, y + 16, 108, 32, canSpend ? 0x533719 : 0x2a2117, 0.96)
+    const button = this.add.rectangle(452, y + 10, 132, 44, canSpend ? 0x533719 : 0x2a2117, 0.96)
       .setOrigin(0, 0)
       .setStrokeStyle(1, canSpend ? 0xf0cf78 : 0x5b4529, 0.95);
     const buttonLabel = locked ? 'Unlock 1 SP' : 'Train +1 1 SP';
-    const buttonText = this.add.text(522, y + 32, save.player.skillPoints > 0 ? buttonLabel : 'Need SP', {
+    const buttonText = this.add.text(518, y + 32, save.player.skillPoints > 0 ? buttonLabel : 'Need SP', {
       fontFamily: 'Georgia',
       fontSize: '12px',
       color: canSpend ? '#fff0bd' : '#8e7f67'
     }).setOrigin(0.5);
+    const actionZone = this.add.rectangle(432, y, 170, 64, 0xffffff, 0.001)
+      .setOrigin(0, 0);
     if (canSpend) {
-      button.setInteractive({ useHandCursor: true });
-      button.on('pointerup', () => this.spendSkillPointFromPanel(skillId));
-      buttonText.setInteractive({ useHandCursor: true });
-      buttonText.on('pointerup', () => this.spendSkillPointFromPanel(skillId));
+      actionZone.setInteractive({ useHandCursor: true });
+      actionZone.on('pointerover', () => button.setStrokeStyle(2, 0xffe29a, 1));
+      actionZone.on('pointerout', () => button.setStrokeStyle(1, 0xf0cf78, 0.95));
+      actionZone.on('pointerdown', (_pointer: Phaser.Input.Pointer, _localX: number, _localY: number, event?: Phaser.Types.Input.EventData) => {
+        event?.stopPropagation();
+        this.spendSkillPointFromPanel(skillId);
+      });
     }
-    panel.add([row, title, status, detailText, barBg, bar, button, buttonText]);
+    panel.add([row, title, status, detailText, barBg, bar, button, buttonText, actionZone]);
   }
 
   private spendSkillPointFromPanel(skill: SkillId): void {
@@ -713,20 +837,41 @@ export abstract class BasePlayScene extends Phaser.Scene {
       this.flashDamage(this.player.x, this.player.y - 112, 'No skill point available', '#ff9f72');
       return;
     }
+    playAudioCue('skillSpend');
     saveGame(GameStore.save);
     this.flashDamage(this.player.x, this.player.y - 112, `${this.labelFromId(skill)} improved`, '#d9f0b0');
     this.renderSkillsPanel();
     this.refreshHud();
   }
 
+  private skillHotkeyLabel(skill: SkillId): string {
+    return `${(['sword', 'gathering', 'crafting', 'swordQiSlash'] as SkillId[]).indexOf(skill) + 1}.`;
+  }
+
+  private handleSkillsPanelPointer(pointer: Phaser.Input.Pointer): boolean {
+    const localX = pointer.x - 330;
+    const localY = pointer.y - 104;
+    if (localX < 0 || localX > 620 || localY < 0 || localY > 456) return false;
+
+    const skills: SkillId[] = ['sword', 'gathering', 'crafting', 'swordQiSlash'];
+    for (let index = 0; index < skills.length; index += 1) {
+      const rowY = 130 + index * 76;
+      const inActionColumn = localX >= 432 && localX <= 602;
+      const inActionRow = localY >= rowY && localY <= rowY + 64;
+      if (inActionColumn && inActionRow) {
+        this.spendSkillPointFromPanel(skills[index]);
+        return true;
+      }
+    }
+    return true;
+  }
+
   private labelFromId(id: string): string {
     return id.replace(/([A-Z])/g, ' $1').replace(/^./, (first) => first.toUpperCase());
   }
 
-  private inventoryEntries(): { itemId: ItemId; count: number }[] {
-    const combined = { ...GameStore.save.player.storage };
-    addItems(combined, GameStore.save.player.inventory);
-    return (Object.entries(combined) as [ItemId, number][])
+  private inventoryEntries(inventory: Inventory): { itemId: ItemId; count: number }[] {
+    return (Object.entries(inventory) as [ItemId, number][])
       .filter(([itemId, count]) => count > 0 && itemId !== 'unarmed')
       .sort(([a], [b]) => {
         const kindOrder = ['weapon', 'tool', 'consumable', 'defense', 'resource'];
@@ -736,7 +881,26 @@ export abstract class BasePlayScene extends Phaser.Scene {
       .map(([itemId, count]) => ({ itemId, count }));
   }
 
+  private transferInventoryItem(itemId: ItemId, source: InventorySource, amount: number): void {
+    const sourceInventory = source === 'inventory' ? GameStore.save.player.inventory : GameStore.save.player.storage;
+    const targetInventory = source === 'inventory' ? GameStore.save.player.storage : GameStore.save.player.inventory;
+    const available = sourceInventory[itemId] ?? 0;
+    const moved = Math.min(amount, available);
+    if (moved <= 0) return;
+    if (!removeItems(sourceInventory, { [itemId]: moved })) return;
+    addItems(targetInventory, { [itemId]: moved });
+    playAudioCue('pickup', 0.55);
+    saveGame(GameStore.save);
+    this.updateHotbarHud();
+    this.renderInventoryPanel();
+  }
+
   private useHotbarSlot(index: number): void {
+    if (this.skillsOpen) {
+      const skill = (['sword', 'gathering', 'crafting', 'swordQiSlash'] as SkillId[])[index];
+      if (skill) this.spendSkillPointFromPanel(skill);
+      return;
+    }
     this.selectedHotbarSlot = index;
     const itemId = GameStore.save.player.hotbar[index];
     this.updateHotbarHud();
@@ -759,6 +923,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
         return;
       }
       GameStore.save.player.equipped = itemId;
+      playAudioCue('uiOpen');
       this.flashDamage(this.player.x, this.player.y - 112, `Equipped ${item.name}`, '#d9f0b0');
       saveGame(GameStore.save);
       return;
@@ -772,6 +937,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
       const key = itemId as 'barricade' | 'spikeTrap' | 'fireTalismanTrap';
       GameStore.save.world.defenses[key] += 1;
       GameStore.save.world.objectives.placedDefense = true;
+      playAudioCue('deviceQueued');
       this.flashDamage(this.player.x, this.player.y - 112, `Placed ${item.name}`, '#d9f0b0');
       saveGame(GameStore.save);
       return;
@@ -784,7 +950,10 @@ export abstract class BasePlayScene extends Phaser.Scene {
       }
       if (this.removeOneAvailable(itemId)) {
         GameStore.save.player.hunger = Phaser.Math.Clamp(GameStore.save.player.hunger + item.hungerRestore, 0, 100);
+        const buffName = applyConsumableBuff(GameStore.save, itemId);
+        playAudioCue('pickup');
         this.flashDamage(this.player.x, this.player.y - 112, `Ate ${item.name} +${item.hungerRestore} Hunger`, '#dff0a8');
+        if (buffName) this.flashDamage(this.player.x, this.player.y - 136, buffName, '#f8e7b8');
         saveGame(GameStore.save);
       }
       return;
@@ -798,7 +967,10 @@ export abstract class BasePlayScene extends Phaser.Scene {
       if (this.removeOneAvailable(itemId)) {
         this.player.setHp(Phaser.Math.Clamp(this.player.hp + item.healthRestore, 0, 100));
         GameStore.save.player.hp = this.player.hp;
+        const buffName = applyConsumableBuff(GameStore.save, itemId);
+        playAudioCue('pickup');
         this.flashDamage(this.player.x, this.player.y - 112, `Used ${item.name} +${item.healthRestore} HP`, '#dff0a8');
+        if (buffName) this.flashDamage(this.player.x, this.player.y - 136, buffName, '#f8e7b8');
         saveGame(GameStore.save);
       }
       return;
@@ -811,6 +983,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
       }
       if (this.removeOneAvailable(itemId)) {
         GameStore.save.world.formationCoreHp = Math.min(150, GameStore.save.world.formationCoreHp + item.coreRepair);
+        playAudioCue('deviceComplete');
         this.flashDamage(this.player.x, this.player.y - 112, `Core +${item.coreRepair}`, '#dff0a8');
         saveGame(GameStore.save);
       }
@@ -886,16 +1059,31 @@ export abstract class BasePlayScene extends Phaser.Scene {
       `Path to Day 15  ${doneCount}/9`,
       `${active.done ? 'Complete' : 'Next'}: ${active.title}`,
       active.detail,
+      `Reward: ${objectiveRewardSummary(active.id)}`,
       '',
       'F3 debug overlay'
     ].join('\n'));
   }
 
-  protected spawnEnemy(id: EnemyId, x: number, y: number): void {
+  private claimObjectiveRewards(): void {
+    const claims = claimCompletedObjectiveRewards(GameStore.save);
+    if (claims.length === 0) return;
+    saveGame(GameStore.save);
+    claims.slice(0, 3).forEach((claim, index) => {
+      this.time.delayedCall(index * 280, () => {
+        playAudioCue('skillSpend', 0.55);
+        this.flashDamage(this.player.x, this.player.y - 132 - index * 22, `Objective: ${claim.title}`, '#dff0a8');
+        this.flashDamage(this.player.x, this.player.y - 108 - index * 22, claim.summary, '#f8e7b8');
+      });
+    });
+  }
+
+  protected spawnEnemy(id: EnemyId, x: number, y: number, options: EnemySpawnOptions = {}): void {
     const def = ENEMIES[id];
-    const actor = new CardActor(this, x, y, def.name, def.color, def.hp, def.speed, def.textureKey);
+    const hpMultiplier = options.hpMultiplier ?? 1;
+    const actor = new CardActor(this, x, y, `${def.name}${options.labelSuffix ?? ''}`, def.color, Math.ceil(def.hp * hpMultiplier), def.speed, def.textureKey);
     actor.setDepth(y);
-    this.enemies.push({ id, actor, attackTimer: 0 });
+    this.enemies.push({ id, actor, attackTimer: 0, damageMultiplier: options.damageMultiplier ?? 1 });
   }
 
   protected updateEnemies(delta: number): void {
@@ -921,11 +1109,11 @@ export abstract class BasePlayScene extends Phaser.Scene {
           enemy.attackTimer = 1000;
           enemy.actor.playUnarmedMeleeLunge(new Phaser.Math.Vector2(targetActor.x, targetActor.y));
           if (targetActor === this.spiritDog) {
-            this.damageActor(targetActor, ENEMIES[enemy.id].damage, new Phaser.Math.Vector2(enemy.actor.x, enemy.actor.y), '#f06b55', 18);
+            this.damageActor(targetActor, this.enemyDamage(enemy), new Phaser.Math.Vector2(enemy.actor.x, enemy.actor.y), '#f06b55', 18);
             GameStore.save.player.spiritDog.hp = targetActor.hp;
             if (targetActor.hp <= 0) this.defeatSpiritDog(targetActor);
           } else {
-            if (!this.invulnerable) this.damageActor(this.player, ENEMIES[enemy.id].damage, new Phaser.Math.Vector2(enemy.actor.x, enemy.actor.y), '#f06b55', 18);
+            if (!this.isPlayerInvulnerable()) this.damageActor(this.player, Math.ceil(this.enemyDamage(enemy) * survivalStatus(GameStore.save, this.player.hp).incomingDamageMultiplier), new Phaser.Math.Vector2(enemy.actor.x, enemy.actor.y), '#f06b55', 18);
             else this.flashDamage(this.player.x, this.player.y - 80, 'blocked', '#d9f0b0');
             if (this.player.hp <= 0) this.onPlayerDefeated();
           }
@@ -937,8 +1125,12 @@ export abstract class BasePlayScene extends Phaser.Scene {
     this.enemies = this.enemies.filter((enemy) => enemy.actor.active && !enemy.defeated);
   }
 
+  private enemyDamage(enemy: EnemyActor): number {
+    return Math.ceil(ENEMIES[enemy.id].damage * enemy.damageMultiplier);
+  }
+
   protected basicAttack(): void {
-    if (this.movementLocked) return;
+    if (this.movementLocked || this.dodging) return;
     const now = this.time.now;
     if (now - this.lastAttack < 360) return;
     this.lastAttack = now;
@@ -948,23 +1140,36 @@ export abstract class BasePlayScene extends Phaser.Scene {
     } else {
       this.weaponIcon(0xd5d5c8, 130);
     }
-    this.damageNearest(this.equippedDamage(), GameStore.save.player.equipped === 'unarmed' ? 192 : 96);
+    playAudioCue('weaponSwing');
+    const status = survivalStatus(GameStore.save, this.player.hp);
+    this.damageNearest(Math.ceil(this.equippedDamage() * status.outgoingDamageMultiplier), GameStore.save.player.equipped === 'unarmed' ? 192 : 96);
+    this.damageEquippedDurability();
     grantSkillXp(GameStore.save, 'sword', 6);
   }
 
+  private damageEquippedDurability(): void {
+    const equipped = GameStore.save.player.equipped;
+    const result = damageDurability(GameStore.save, equipped, ITEMS[equipped].kind === 'tool' ? 1.5 : 1);
+    if (!result) return;
+    if (result.broke) this.flashDamage(this.player.x, this.player.y - 132, `${ITEMS[equipped].name} broke`, '#ff9f72');
+    saveGame(GameStore.save);
+    this.updateHotbarHud();
+    if (this.inventoryOpen) this.renderInventoryPanel();
+  }
+
   protected castSwordQi(): void {
-    if (this.movementLocked) return;
+    if (this.movementLocked || this.dodging) return;
     if (!GameStore.save.player.skills.swordQiSlash.unlocked || GameStore.save.player.spirit < 8) return;
     GameStore.save.player.spirit -= 8;
     this.player.playCastPulse();
+    playAudioCue('cast');
     this.weaponIcon(0x8ed9f4, 220);
     this.damageNearest(34, 170);
     grantSkillXp(GameStore.save, 'swordQiSlash', 10);
   }
 
   private equippedDamage(): number {
-    const equipped = GameStore.save.player.equipped;
-    return equipped === 'ironSword' ? 26 : equipped === 'stonePickaxe' ? 18 : equipped === 'woodenAxe' ? 17 : 16;
+    return equippedCombatDamage(GameStore.save);
   }
 
   private damageNearest(damage: number, range: number): void {
@@ -999,7 +1204,107 @@ export abstract class BasePlayScene extends Phaser.Scene {
     actor.setHp(actor.hp - damage);
     actor.playHitShake();
     actor.playKnockbackFrom(source, knockback);
+    playAudioCue('combatHit');
     this.flashDamage(actor.x, actor.y - 80, `-${damage}`, color);
+  }
+
+  private performDodge(pointer?: Phaser.Input.Pointer): void {
+    if (this.movementLocked || this.inventoryOpen || this.skillsOpen || this.dodging) return;
+    const now = this.time.now;
+    const profile = dodgeProfile(GameStore.save, this.player.hp);
+    const cooldownRemaining = Math.ceil((this.lastDodge + profile.cooldownMs - now) / 100) / 10;
+    if (cooldownRemaining > 0) {
+      this.flashDamage(this.player.x, this.player.y - 112, `Dodge ${cooldownRemaining.toFixed(1)}s`, '#ffcf9c');
+      return;
+    }
+    if (!profile.canDodge) {
+      this.flashDamage(this.player.x, this.player.y - 112, profile.reason ?? 'Cannot dodge', '#ff9f72');
+      return;
+    }
+
+    const dir = this.dodgeDirection(pointer);
+    GameStore.save.player.energy = Phaser.Math.Clamp(GameStore.save.player.energy - profile.energyCost, 0, 100);
+    this.lastDodge = now;
+    this.dodgeInvulnerableUntil = now + profile.invulnerabilityMs;
+    this.dodging = true;
+    this.createDodgeAfterimage();
+
+    const target = this.dodgeTarget(dir, profile.distance);
+    playAudioCue('weaponSwing', 0.45);
+    this.tweens.killTweensOf(this.player);
+    this.tweens.killTweensOf(this.player.card);
+    this.tweens.add({
+      targets: this.player,
+      x: target.x,
+      y: target.y,
+      duration: 150,
+      ease: 'Cubic.easeOut',
+      onUpdate: () => this.player.setDepth(this.player.y),
+      onComplete: () => {
+        this.player.setDepth(this.player.y);
+        this.dodging = false;
+      }
+    });
+    this.tweens.add({
+      targets: this.player.card,
+      alpha: 0.42,
+      rotation: dir.x >= 0 ? 0.18 : -0.18,
+      scaleX: 1.06,
+      scaleY: 0.92,
+      duration: 75,
+      yoyo: true,
+      ease: 'Sine.easeOut',
+      onComplete: () => {
+        this.player.card.alpha = 1;
+        this.player.card.rotation = 0;
+        this.player.card.scaleX = 1;
+        this.player.card.scaleY = 1;
+      }
+    });
+    grantSkillXp(GameStore.save, 'gathering', 2);
+  }
+
+  private dodgeDirection(pointer?: Phaser.Input.Pointer): Phaser.Math.Vector2 {
+    const keyboardDir = new Phaser.Math.Vector2(
+      (this.cursors.right.isDown ? 1 : 0) - (this.cursors.left.isDown ? 1 : 0),
+      (this.cursors.down.isDown ? 1 : 0) - (this.cursors.up.isDown ? 1 : 0)
+    );
+    if (keyboardDir.lengthSq() > 0) return keyboardDir.normalize();
+    const source = pointer ?? this.input.activePointer;
+    const world = this.cameras.main.getWorldPoint(source.x, source.y);
+    const pointerDir = new Phaser.Math.Vector2(world.x - this.player.x, world.y - this.player.y);
+    if (pointerDir.lengthSq() > 0) return pointerDir.normalize();
+    return new Phaser.Math.Vector2(1, 0);
+  }
+
+  private dodgeTarget(dir: Phaser.Math.Vector2, distance: number): Phaser.Math.Vector2 {
+    const steps = 8;
+    for (let step = steps; step >= 1; step -= 1) {
+      const ratio = step / steps;
+      const x = Phaser.Math.Clamp(this.player.x + dir.x * distance * ratio, 60, 1860);
+      const y = Phaser.Math.Clamp(this.player.y + dir.y * distance * ratio, 80, 1320);
+      if (!this.actorBlockedAt(this.player, x, y)) return new Phaser.Math.Vector2(x, y);
+    }
+    return new Phaser.Math.Vector2(this.player.x, this.player.y);
+  }
+
+  private createDodgeAfterimage(): void {
+    const ghost = this.add.rectangle(this.player.x, this.player.y - 42, 78, 104, 0xd8eef2, 0.18)
+      .setStrokeStyle(2, 0xf4e4b3, 0.3)
+      .setDepth(this.player.depth - 1);
+    this.tweens.add({
+      targets: ghost,
+      alpha: 0,
+      scaleX: 0.88,
+      scaleY: 0.88,
+      duration: 260,
+      ease: 'Sine.easeOut',
+      onComplete: () => ghost.destroy()
+    });
+  }
+
+  private isPlayerInvulnerable(): boolean {
+    return this.invulnerable || this.time.now <= this.dodgeInvulnerableUntil;
   }
 
   private weaponIcon(color: number, distance: number): void {
@@ -1039,9 +1344,13 @@ export abstract class BasePlayScene extends Phaser.Scene {
   }
 
   protected onPlayerDefeated(): void {
-    loseHalf(GameStore.save.player.unsecured);
+    const lost = createLostLootFromDefeat(GameStore.save, GameStore.save.world.expeditionRoute, this.player.x, this.player.y);
+    if (Object.values(lost).some((count) => (count ?? 0) > 0)) {
+      this.flashDamage(this.player.x, this.player.y - 132, `Lost pack: ${inventoryText(lost)}`, '#ffcf9c');
+    }
     this.player.setHp(65);
     GameStore.save.player.hp = 65;
+    saveGame(GameStore.save);
     this.scene.start('FarmScene');
   }
 
@@ -1050,7 +1359,11 @@ export abstract class BasePlayScene extends Phaser.Scene {
     this.status.setText([
       `Day ${save.world.day}  ${Math.floor(save.world.minutes / 60).toString().padStart(2, '0')}:${Math.floor(save.world.minutes % 60).toString().padStart(2, '0')}  Siege in ${Math.max(0, 15 - save.world.day)} days`,
       `HP ${Math.ceil(this.player.hp)}/100  Energy ${Math.ceil(save.player.energy)}  Hunger ${Math.ceil(save.player.hunger)}  Spirit ${Math.ceil(save.player.spirit)}  Regen ${effectiveRegenerationPerSecond(save).toFixed(2)}/s`,
-      `Skill points ${save.player.skillPoints}  Sword Qi ${save.player.skills.swordQiSlash.unlocked ? 'ready' : 'locked'}  Dog ${save.player.spiritDog.command} ${Math.ceil(save.player.spiritDog.hp)}/80 R${effectivePetRegenerationPerSecond(save).toFixed(2)}/s`
+      `Skill points ${save.player.skillPoints}  Sword Qi ${save.player.skills.swordQiSlash.unlocked ? 'ready' : 'locked'}  Dog ${save.player.spiritDog.command} ${Math.ceil(save.player.spiritDog.hp)}/80 R${effectivePetRegenerationPerSecond(save).toFixed(2)}/s`,
+      encumbrance(save).line,
+      survivalStatus(save, this.player.hp).warningLine,
+      activeBuffLine(save),
+      conditionHudLine(save)
     ].join('\n'));
   }
 
@@ -1109,6 +1422,7 @@ export abstract class BasePlayScene extends Phaser.Scene {
       'F12 grant skill point + unlock Sword Qi',
       'I inventory/hotbar assignment',
       '1-8 use hotbar slots',
+      'Right Click/Ctrl dodge',
       'T Sword Qi Slash',
       'Q eat best cooked food',
       '[ toggle unarmed player attack'
@@ -1275,7 +1589,12 @@ export abstract class BasePlayScene extends Phaser.Scene {
       if (!item.hungerRestore) continue;
       if (removeItems(GameStore.save.player.inventory, { [itemId]: 1 }) || removeItems(GameStore.save.player.storage, { [itemId]: 1 })) {
         GameStore.save.player.hunger = Phaser.Math.Clamp(GameStore.save.player.hunger + item.hungerRestore, 0, 100);
+        const buffName = applyConsumableBuff(GameStore.save, itemId);
         this.flashDamage(this.player.x, this.player.y - 112, `Ate ${item.name} +${item.hungerRestore} Hunger`, '#dff0a8');
+        if (buffName) this.flashDamage(this.player.x, this.player.y - 136, buffName, '#f8e7b8');
+        playAudioCue('pickup');
+        saveGame(GameStore.save);
+        this.updateHotbarHud();
         return;
       }
     }

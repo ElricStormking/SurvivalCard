@@ -1,11 +1,42 @@
-import type { GameSave } from '../types';
+import type { GameSave, Inventory, SkillId } from '../types';
+import { addItems } from './inventory';
+import { grantSkillXp } from './progression';
+
+type ObjectiveId = keyof GameSave['world']['objectives'];
 
 export interface ObjectiveStep {
-  id: keyof GameSave['world']['objectives'];
+  id: ObjectiveId;
   title: string;
   detail: string;
   done: boolean;
 }
+
+export interface ObjectiveRewardClaim {
+  id: ObjectiveId;
+  title: string;
+  summary: string;
+}
+
+interface ObjectiveReward {
+  inventory?: Inventory;
+  storage?: Inventory;
+  skillXp?: Partial<Record<SkillId, number>>;
+  skillPoints?: number;
+  spirit?: number;
+  coreHp?: number;
+}
+
+const OBJECTIVE_REWARDS: Record<ObjectiveId, ObjectiveReward> = {
+  visitedForest: { inventory: { resin: 1 }, skillXp: { gathering: 6 } },
+  gatheredResource: { skillXp: { gathering: 14 } },
+  extractedLoot: { skillPoints: 1, inventory: { medicine: 1 } },
+  queuedProduction: { skillXp: { crafting: 12 } },
+  craftedMedicine: { skillXp: { crafting: 18 }, spirit: 5 },
+  craftedIronSword: { skillXp: { sword: 20 }, spirit: 8 },
+  placedDefense: { storage: { repairKit: 1 }, coreHp: 15 },
+  startedSiege: { spirit: 15 },
+  wonSiege: { storage: { spiritPaper: 2, resin: 2 } }
+};
 
 export function objectiveSteps(save: GameSave): ObjectiveStep[] {
   const flags = save.world.objectives;
@@ -74,4 +105,49 @@ export function activeObjective(save: GameSave): ObjectiveStep {
     detail: 'The full prototype loop has been completed.',
     done: true
   };
+}
+
+export function objectiveRewardSummary(id: ObjectiveId): string {
+  return summarizeReward(OBJECTIVE_REWARDS[id]);
+}
+
+export function claimCompletedObjectiveRewards(save: GameSave): ObjectiveRewardClaim[] {
+  const claims: ObjectiveRewardClaim[] = [];
+  save.world.objectiveRewardsClaimed = save.world.objectiveRewardsClaimed ?? {};
+  for (const step of objectiveSteps(save)) {
+    if (!step.done || save.world.objectiveRewardsClaimed[step.id]) continue;
+    const reward = OBJECTIVE_REWARDS[step.id];
+    applyReward(save, reward);
+    save.world.objectiveRewardsClaimed[step.id] = true;
+    claims.push({
+      id: step.id,
+      title: step.title,
+      summary: summarizeReward(reward)
+    });
+  }
+  return claims;
+}
+
+function applyReward(save: GameSave, reward: ObjectiveReward): void {
+  if (reward.inventory) addItems(save.player.inventory, reward.inventory);
+  if (reward.storage) addItems(save.player.storage, reward.storage);
+  if (reward.skillXp) {
+    for (const [skillId, xp] of Object.entries(reward.skillXp) as [SkillId, number][]) {
+      grantSkillXp(save, skillId, xp);
+    }
+  }
+  if (reward.skillPoints) save.player.skillPoints += reward.skillPoints;
+  if (reward.spirit) save.player.spirit = Math.min(100, save.player.spirit + reward.spirit);
+  if (reward.coreHp) save.world.formationCoreHp = Math.min(150, save.world.formationCoreHp + reward.coreHp);
+}
+
+function summarizeReward(reward: ObjectiveReward): string {
+  const parts: string[] = [];
+  if (reward.inventory) parts.push(...Object.entries(reward.inventory).map(([id, count]) => `${id} x${count}`));
+  if (reward.storage) parts.push(...Object.entries(reward.storage).map(([id, count]) => `${id} x${count} storage`));
+  if (reward.skillXp) parts.push(...Object.entries(reward.skillXp).map(([id, xp]) => `${id} XP +${xp}`));
+  if (reward.skillPoints) parts.push(`Skill point +${reward.skillPoints}`);
+  if (reward.spirit) parts.push(`Spirit +${reward.spirit}`);
+  if (reward.coreHp) parts.push(`Core +${reward.coreHp}`);
+  return parts.join(', ');
 }

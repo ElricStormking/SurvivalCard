@@ -37,6 +37,7 @@ export type ProfessionId =
 export type DeviceId = 'workbench' | 'cookingFire' | 'furnace' | 'alchemyFurnace' | 'talismanTable';
 export type RecipeId = 'medicine' | 'grilledMeat' | 'herbSteak' | 'ironSword' | 'ironAxe' | 'ironPickaxe' | 'barricade' | 'spikeTrap' | 'fireTalismanTrap' | 'repairKit';
 export type EnemyId = 'boar' | 'wolf' | 'ghost' | 'corpse' | 'captain';
+export type ExpeditionRouteId = 'pineForest' | 'ironRidge';
 
 export type Inventory = Partial<Record<ItemId, number>>;
 export type AttributeId = keyof AttributeSet;
@@ -44,6 +45,9 @@ export type PrototypeAffinityId = 'metal' | 'wood' | 'fire' | 'light';
 export type PrototypeAffinities = Record<PrototypeAffinityId, number>;
 export type AttributeProgress = Record<AttributeId, number>;
 export type SpiritDogCommand = 'follow' | 'attack' | 'guard' | 'retreat';
+export type CultivationRealm = 'Mortal' | 'Qi Gathering';
+export type NightEventId = 'wanderingGhost' | 'wildBeast' | 'moonlitHerb' | 'woundedTraveler' | 'thiefScout';
+export type ActiveBuffId = 'warmMeal' | 'herbalFortitude' | 'mendingPoultice';
 
 export interface AttributeSet {
   strength: number;
@@ -80,6 +84,7 @@ export interface PlayerState {
   attributeProgress: AttributeProgress;
   affinities: PrototypeAffinities;
   equipped: ItemId;
+  itemDurability: Partial<Record<ItemId, number>>;
   hotbar: (ItemId | null)[];
   inventory: Inventory;
   unsecured: Inventory;
@@ -87,6 +92,11 @@ export interface PlayerState {
   unlockedRecipes: RecipeId[];
   skills: Record<SkillId, { xp: number; level: number; unlocked: boolean }>;
   skillPoints: number;
+  cultivation: {
+    realm: CultivationRealm;
+    insight: number;
+    breakthroughs: number;
+  };
   passives: {
     orbitingSword: boolean;
     minorFlameAura: boolean;
@@ -95,6 +105,7 @@ export interface PlayerState {
     regenerationMultiplier: number;
     regenerationFlat: number;
   };
+  activeBuffs: Partial<Record<ActiveBuffId, { remaining: number }>>;
   spiritDog: {
     unlocked: boolean;
     command: SpiritDogCommand;
@@ -113,16 +124,40 @@ export interface DeviceQueueEntry {
   total: number;
 }
 
+export interface NightEventRecord {
+  id: NightEventId;
+  day: number;
+  title: string;
+  summary: string;
+  effects: string[];
+}
+
+export interface LostLootState {
+  route: ExpeditionRouteId;
+  items: Inventory;
+  x: number;
+  y: number;
+  day: number;
+}
+
 export interface WorldState {
   day: number;
   minutes: number;
   timeScale: number;
   scene: 'farm' | 'forest' | 'siege';
+  expeditionRoute: ExpeditionRouteId;
+  expeditionStats: Record<ExpeditionRouteId, { visits: number; extractions: number; clears: number }>;
   formationCoreHp: number;
   devices: Record<DeviceId, DeviceQueueEntry[]>;
+  deviceFuel: Record<DeviceId, number>;
+  deviceCondition: Record<DeviceId, number>;
   deviceOutputs: Record<DeviceId, Inventory>;
   defenses: { barricade: number; spikeTrap: number; fireTalismanTrap: number };
   siegeWon: boolean;
+  siegeCyclesSurvived: number;
+  lostLoot: LostLootState | null;
+  lastNightEventDay: number;
+  nightEventLog: NightEventRecord[];
   objectives: {
     visitedForest: boolean;
     gatheredResource: boolean;
@@ -134,6 +169,7 @@ export interface WorldState {
     startedSiege: boolean;
     wonSiege: boolean;
   };
+  objectiveRewardsClaimed: Partial<Record<keyof WorldState['objectives'], boolean>>;
 }
 
 export interface GameSave {
